@@ -1,6 +1,9 @@
+import os, sys, math
+sys.path.append(os.path.dirname(os.path.join(__file__, '..')))
 import torch
 import torch.nn as nn
 from typing import Optional, List, Tuple, Union, Any
+from Utils.Cache_utils import Cache
 
 
 class Qwen2Config:
@@ -155,12 +158,34 @@ class Qwen2Attention(nn.Module):
 
     self.rotary_emb = Qwen2RotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings, base=self.rope_theta)
 
-  def forward(self, hidden_states : torch.Tensor, attention_mask : Optional[torch.Tensor] = None, position_ids : Optional[torch.LongTensor] = None, past_key_value : Optional[Any] = None, output_attentions : bool = False, use_cache : bool = False, cache_position : Optional[torch.LongTensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+  def forward(self, hidden_states : torch.Tensor, attention_mask : Optional[torch.Tensor] = None, position_ids : Optional[torch.LongTensor] = None, past_key_value : Optional[Cache] = None, output_attentions : bool = False, use_cache : bool = False, cache_position : Optional[torch.LongTensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     bsz, q_len = hidden_states.size()
 
     query_states = self.q_proj(hidden_states)
     key_states = self.k_proj(hidden_states)
     value_states = self.v_proj(hidden_states)
 
+    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+    value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+    kv_seq_len = key_states.shape[-2]
+    if past_key_value is not None:
+      if self.layer_idx is None:
+        raise ValueError("for auto-regressive decoding with k/v caching, please make sure to initialize the attention class for a layer index")
     
+      kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+    cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+
+    if past_key_value is not None:
+      cache_kwargs = {"sin" : sin, "cos" : cos, "cache_position" : cache_position}
+      key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+    key_states = repeat_kv(key_states, self.num_key_value_groups)
+    value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+    attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+
+
     
