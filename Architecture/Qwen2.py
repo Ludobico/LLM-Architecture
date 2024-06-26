@@ -187,5 +187,33 @@ class Qwen2Attention(nn.Module):
 
     attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
+    if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
+      raise ValueError(
+        f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is {attn_weights.size()}"
+      )
+    
+    if attention_mask is not None:
+      causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+      attn_weights = attn_weights + causal_mask
+    
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.device)
+    attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+    attn_output = torch.matmul(attn_weights, value_states)
+
+    if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+      raise ValueError(
+        f"Attention output should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is {attn_output.size()}")
+
+    attn_output = attn_output.transpose(1, 2).contiguous()
+    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+
+    attn_output = self.o_proj(attn_output)
+
+    if not output_attentions:
+      attn_weights = None
+    
+    return attn_output, attn_weights, past_key_value
+
+
 
     
