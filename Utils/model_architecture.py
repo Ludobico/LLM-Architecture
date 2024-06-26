@@ -8,7 +8,7 @@ class ModelArchitecture:
     self.model_id = model_id
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    if cache_dir:
+    if cache_dir is not None:
       self.huggingface_cache_dir = cache_dir
   
   def get_model_architecture(self) -> None:
