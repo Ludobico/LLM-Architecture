@@ -216,4 +216,134 @@ class Qwen2Attention(nn.Module):
 
 
 
+class Qwen2SdpaAttention(Qwen2Attention):
+  """
+  This Module inherits from Qwen2Attention and thus uses the `__init__` method of the parent class.
+  """
+
+  def forward(self, hidden_states : torch.Tensor, attention_mask : Optional[torch.Tensor] = None, position_ids : Optional[torch.LongTensor] = None, past_key_value : Optional[Cache] = None, output_attentions : bool = False, use_cache : bool = False, cache_position : Optional[torch.LongTensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    if output_attentions :
+      return super().forward(
+        hidden_states=hidden_states,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        past_key_value=past_key_value,
+        output_attentions=output_attentions,
+        use_cache=use_cache
+      )
+  
+    bsz, q_len = hidden_states.size()
+
+    query_states = self.q_proj(hidden_states)
+    key_states = self.k_proj(hidden_states)
+    value_states = self.v_proj(hidden_states)
+
+    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+    value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+    kv_seq_len = key_states.shape[-2]
+    if past_key_value is not None:
+      kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+    
+    cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+
+    if past_key_value is not None:
+      cache_kwargs = {"sin" : sin, "cos" : cos, "cache_position" : cache_position}
+      key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+    
+    key_states = repeat_kv(key_states, self.num_key_value_groups)
+    value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+    causal_mask = attention_mask
+    if attention_mask is not None:
+      causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+    
+    if query_states.device.type == "cuda" and attention_mask is not None:
+      query_states = query_states.contiguous()
+      key_states = key_states.contiguous()
+      value_states = value_states.contiguous()
+    
+    is_causal = True if causal_mask is None and q_len > 1 else False
+
+    attn_output = torch.nn.functional.scaled_dot_product_attention(
+      query_states, key_states, value_states, attn_mask=causal_mask, dropout_p=self.attention_dropout if self.training else 0.0,
+      is_causal=is_causal
+    )
+
+    attn_output = attn_output.transpose(1, 2).contiguous()
+    attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+
+    attn_output = self.o_proj(attn_output)
+
+    return attn_output, None, past_key_value
+
+QWEN2_ATTENTION_CLASSES = {
+  "eager" : Qwen2Attention,
+  "sdpa" : Qwen2SdpaAttention
+}
+  
+
+class Qwen2DecoderLayer(nn.Module):
+  def __init__(self, config : Qwen2Config, layer_idx : int):
+    super().__init__()
+    self.hidden_size = config.hidden_size
+
+    self.self_attn = QWEN2_ATTENTION_CLASSES["sdpa"](config, layer_idx)
+
+    self.mlp = Qwen2MLP(config)
+    self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+    self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+  def forward(
+      self,
+      hidden_states : torch.Tensor,
+      attention_mask : Optional[torch.Tensor] = None,
+      position_ids : Optional[torch.LongTensor] = None,
+      past_key_value : Optional[Tuple[torch.Tensor]] = None,
+      output_attentions : Optional[bool] = False,
+      use_cache : Optional[bool] = False,
+      cache_position : Optional[torch.LongTensor] = None,
+      **kwargs,
+  ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    
+    residual = hidden_states
+    hidden_states = self.input_layernorm(hidden_states)
+
+    hidden_states, self_attn_weights, present_key_value = self.self_attn(
+      hidden_states=hidden_states,
+      attention_mask=attention_mask,
+      position_ids=position_ids,
+      past_key_value=past_key_value,
+      output_attentions=output_attentions,
+      use_cache=use_cache,
+      cache_position=cache_position,
+    )
+
+    hidden_states = residual + hidden_states,
+
+    residual = hidden_states,
+    hidden_states = self.post_attention_layernorm(hidden_states)
+    hidden_states = self.mlp(hidden_states)
+    hidden_states = residual + hidden_states,
+
+    outputs = (hidden_states,)
+
+    if output_attentions:
+      outputs += (self_attn_weights,)
+    
+    if use_cache:
+      outputs += (present_key_value,)
+    
+    return outputs
+  
+  
+
+
+
+
+
+
     
