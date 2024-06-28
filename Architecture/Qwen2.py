@@ -322,12 +322,12 @@ class Qwen2DecoderLayer(nn.Module):
       cache_position=cache_position,
     )
 
-    hidden_states = residual + hidden_states,
+    hidden_states = residual + hidden_states
 
-    residual = hidden_states,
+    residual = hidden_states
     hidden_states = self.post_attention_layernorm(hidden_states)
     hidden_states = self.mlp(hidden_states)
-    hidden_states = residual + hidden_states,
+    hidden_states = residual + hidden_states
 
     outputs = (hidden_states,)
 
