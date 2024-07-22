@@ -1,10 +1,11 @@
 import torch
-import torch.nn as nn
 
 
-t1 = torch.randn(2,3,1,2,3)
-t2 = torch.randn(2,25,1,4,3)
-
-tc = torch.cat((t1, t2), dim=1)
-
-print(tc.shape)
+x = torch.tensor([[1,2,3], [4,5,6], [7,8,9]])
+print(x)
+print('-'*80)
+print(torch.triu(x))
+print('-'*80)
+print(torch.triu(x, diagonal=1))
+print('-'*80)
+print(torch.triu(x, diagonal=-1))

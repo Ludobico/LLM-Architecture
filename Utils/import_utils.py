@@ -123,3 +123,34 @@ def is_torch_fx_proxy(x):
 
         return isinstance(x, torch.fx.Proxy)
     return False
+
+def is_torch_available():
+    return _torch_available
+
+def is_flash_attn_2_available():
+    if not is_torch_fx_available():
+        return False
+    
+    if not _is_package_available("flash_attn"):
+        return False
+    
+    import torch
+
+    if not (torch.cuda.is_available()):
+        return False
+    
+    if torch.version.cuda:
+        return version.parse(importlib.metadata.version("flash_attn")) >= version.parse("2.1.0")
+    elif torch.version.hip:
+        return version.parse(importlib.metadata.version("flash_attn")) >= version.parse("2.0.4")
+    else:
+        return False
+    
+
+
+def is_flash_attn_greater_or_equal(library_version : str):
+    if not _is_package_available("flash_attn"):
+        return False
+    
+    return version.parse(importlib.metadata.version("flash_attn")) >= version.parse(library_version)
+
