@@ -9,6 +9,7 @@ import inspect
 
 from ..Utils.Cache_utils import Cache, DynamicCache
 from ..Utils.pytorch_utils import is_torch_greater_or_equal_than_2_4
+from ..generation.configuration_utils import GenerationConfig
 
 class GenerationMixin:
     def prepare_inputs_for_generaion(self, *args, **kwargs):
@@ -105,5 +106,6 @@ class GenerationMixin:
         return attention_mask
     
     def _prepare_encoder_decoder_kwargs_for_generation(
-            self, inpus_tensor : torch.Tensor, model_kwargs, model_input_name : Optional[str], generation_config : Ge
-    )
+            self, inpus_tensor : torch.Tensor, model_kwargs, model_input_name : Optional[str], generation_config : GenerationConfig
+    ) -> Dict[str, Any]:
+        pass
