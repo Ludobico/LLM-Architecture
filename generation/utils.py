@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import inspect
 
 from ..Utils.Cache_utils import Cache, DynamicCache
+from ..Utils.pytorch_utils import is_torch_greater_or_equal_than_2_4
 
 class GenerationMixin:
     def prepare_inputs_for_generaion(self, *args, **kwargs):
