@@ -154,3 +154,28 @@ def is_flash_attn_greater_or_equal(library_version : str):
     
     return version.parse(importlib.metadata.version("flash_attn")) >= version.parse(library_version)
 
+
+def is_bitsandbytes_available():
+    if not is_torch_available():
+        return False
+    
+    import torch
+    return _bitsandbytes_available and torch.cuda.is_available()
+
+_torch_xla_available = False
+if USE_TORCH_XLA in ENV_VARS_TRUE_VALUES:
+    _torch_xla_available, _torch_xla_version = _is_package_available("torch_xla", return_version=True)
+@lru_cache
+def is_torch_xla_available(check_is_tpu = False, check_is_gpu = False):
+    assert not (check_is_tpu and check_is_gpu), "check_is_tpu and check_is_gpu cannot both be true"
+
+    if not _torch_xla_available:
+        return False
+    
+    import torch_xla
+
+    if check_is_gpu:
+        return torch_xla.runtime.device_type() in ['GPU', 'CUDA']
+    elif check_is_tpu:
+        return torch_xla.runtime.device_type() == 'TPU'
+    return True
