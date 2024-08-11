@@ -73,6 +73,7 @@ _decord_avaulable = importlib.util.find_spec("decord") is not None
 _detectron2_available = _is_package_available("detectron2")
 _faisee_available = importlib.util.find_spec("faisee") is not None
 _mlx_available = _is_package_available("mlx")
+_peft_available = _is_package_available("peft")
 
 _torch_version = "N/A"
 _torch_available = False
@@ -179,3 +180,9 @@ def is_torch_xla_available(check_is_tpu = False, check_is_gpu = False):
     elif check_is_tpu:
         return torch_xla.runtime.device_type() == 'TPU'
     return True
+
+def is_accelerate_available(min_version : str = ACCELERATE_MIN_VERSION):
+    return _accelerate_available and version.parse(_accelerate_available) >= version.parse(min_version)
+
+def is_peft_available():
+    return _peft_available
