@@ -6,7 +6,7 @@ import warnings
 from typing import Any, Dict, List, Optional, Union
 
 from Utils.import_utils import is_torch_available, is_accelerate_available, is_peft_available
-from itergrations.peft_utils import find_adapter_config_file, check_peft_version
+from intergrations.peft_utils import find_adapter_config_file, check_peft_version
 
 
 if is_torch_available():
