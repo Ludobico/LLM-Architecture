@@ -200,4 +200,62 @@ class PeftAdapterMixin:
                     module.enable_adapters(enabled=True)
                 else:
                     module.disable_adapters = False
+    
+    def active_adapters(self) -> List[str]:
+        check_peft_version(MIN_PEFT_VERSION)
 
+        if not is_peft_available():
+            raise ImportError("Please install the latest version of PEFT")
+        
+        if not self._hf_peft_config_loaded:
+            raise ValueError("Please call `add_adapter` before `active_adapter`")
+        
+        from peft.tuners.tuners_utils import BaseTunerLayer
+
+        for _, module in self.named_modules():
+            if isinstance(module, BaseTunerLayer):
+                active_adapters = module.active_adapter
+                break
+        
+        if isinstance(active_adapters, str):
+            active_adapters = [active_adapters]
+        
+        return active_adapters
+    
+    def active_adapter(self) -> str:
+        return self.active_adapters()[0]
+    
+    def get_adapter_state_dict(self, adapter_name : Optional[str] = None) -> dict:
+        check_peft_version(MIN_PEFT_VERSION)
+
+        if not self._hf_peft_config_loaded:
+            raise ValueError("Please call `add_adapter` before `get_adapter_state_dict`")
+        
+        from peft.utils import get_peft_model_state_dict
+
+        if adapter_name is None:
+            adapter_name = self.active_adapter()
+
+        adapter_state_dict = get_peft_model_state_dict(self, adapter_name=adapter_name)
+        return adapter_state_dict
+    
+    def _dispatch_accelerate_model(self, device_map : str, max_memory : Optional[int] = None, offload_folder : Optional[str] = None, offload_index : Optional[int] = None) -> None:
+        dispatch_model_kwargs = {}
+
+        if "offload_index" in inspect.signature(dispatch_model).parameters:
+            dispatch_model_kwargs['offload_index'] = offload_index
+
+        no_split_module_classes = self._no_split_modules
+
+        if device_map != "sequential":
+            max_memory = get_balanced_memory(
+                self, max_memory=max_memory, no_split_module_classes=no_split_module_classes, low_zero=(device_map == "balanced_low_0")
+            )
+        
+        if isinstance(device_map, str):
+            device_map = infer_auto_device_map(
+                self, max_memory=max_memory, no_split_module_classes=no_split_module_classes
+            )
+        dispatch_model(
+            self, device_map=device_map, offload_dir=offload_folder, **dispatch_model_kwargs
+        )
