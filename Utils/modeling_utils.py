@@ -26,6 +26,9 @@ from torch.utils.checkpoint import checkpoint
 
 from Utils.import_utils import is_bitsandbytes_available, ENV_VARS_TRUE_VALUES, is_torch_xla_available
 from generation.utils import GenerationMixin
+from intergrations.peft import PeftAdapterMixin
+from Utils.hub import PushToHubMixin
+from Utils import DUMMY_INPUTS
 
 XLA_USE_BF16 = os.environ.get("XLA_USE_BF16", "0").upper()
 XLA_DOWNCAST_BF16 = os.environ.get("XLA_DOWNCAST_BF16", "0").upper()
@@ -240,3 +243,41 @@ class ModuleUtilsMixin:
     def floating_point_ops(self, input_dict = Dict[str, Union[torch.Tensor, Any]], exclude_embeddings : bool = True) -> int:
         return 6 * self.estimate_tokens(input_dict) * self.num_parameters(exclude_embeddings=exclude_embeddings)
 
+
+class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMixin, PeftAdapterMixin):
+    config_class = None
+    base_model_prefix = ""
+    main_input_name = "input_ids"
+    model_tags = None
+
+    _auto_class = None
+    _no_split_modules = None
+    _skip_keys_device_placement = None
+    _keep_in_fp32_modules = None
+
+    _keys_to_ignore_on_load_missing = None
+    _keys_to_ignore_on_load_unexpected = None
+    _keys_to_ignore_on_save = None
+    _tied_weights_keys = None
+
+    is_parallelizable = False
+    supports_gradient_checkpointing = False
+    _is_stateful = False
+
+    _supports_flash_attn_2 = False
+    _supports_sdpa = False
+    _supports_cache_class = False
+    _supports_static_cache = False
+    _supports_quantized_cache = False
+
+    @property
+    def dummy_inputs(self) ->Dict[str, torch.Tensor]:
+        return {"input_ids" : torch.tensor(DUMMY_INPUTS)}
+    
+    @property
+    def framework(self) -> str:
+        return "pt"
+    
+    def __init__(self):
+        pass
+    
