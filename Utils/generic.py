@@ -30,4 +30,27 @@ class PaddingStrategy(ExplicitEnum):
     LONGEST = "longest"
     MAX_LENGTH = "max_length"
     DO_NOT_PAD = "do_not_pad"
-    
+
+
+def add_model_info_to_auto_map(auto_map, repo_id):
+    for key, value in auto_map.items():
+        if isinstance(value, (tuple, list)):
+            auto_map[key] = [f"{repo_id}--{v}" if (v is not None and "--" not in v) else v for v in value]
+        elif value is not None and '--' not in value:
+            auto_map[key] = f"{repo_id}--{value}"
+
+def add_model_info_to_custom_pipelines(custom_pipeline, repo_id):
+    for task in custom_pipeline.keys():
+        if "impl" in custom_pipeline[task]:
+            module = custom_pipeline[task]["impl"]
+            if "--" not in module:
+                custom_pipeline[task]["impl"] = f"{repo_id}--{module}"
+    return custom_pipeline
+
+@contextmanager
+def working_or_temp_dir(working_dir, use_temp_dir : bool = False):
+    if use_temp_dir:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            yield tmp_dir
+    else:
+        yield working_dir

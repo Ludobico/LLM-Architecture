@@ -8,10 +8,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from packaging import version
 
 from Utils.import_utils import is_torch_available
-from Utils.hub import PushToHubMixin
+from Utils.hub import PushToHubMixin, is_remote_url, download_url, cached_file, extract_commit_hash
 from dynamic_module_utils import custom_object_save
 from Utils import CONFIG_NAME
-
+from Utils.customLogger import log
+from Utils.generic import add_model_info_to_auto_map, add_model_info_to_custom_pipelines
 
 _re_configuration_file = re.compile(r"config\.(.*)\.json")
 
@@ -363,9 +364,9 @@ class PretrainedConfig(PushToHubMixin):
             )
 
         if is_local:
-            logger.info(f"loading configuration file {resolved_config_file}")
+            log(f"loading configuration file {resolved_config_file}")
         else:
-            logger.info(f"loading configuration file {configuration_file} from cache at {resolved_config_file}")
+            log(f"loading configuration file {configuration_file} from cache at {resolved_config_file}")
 
         if "auto_map" in config_dict and not is_local:
             config_dict["auto_map"] = add_model_info_to_auto_map(
@@ -376,6 +377,242 @@ class PretrainedConfig(PushToHubMixin):
                 config_dict["custom_pipelines"], pretrained_model_name_or_path
             )
         return config_dict, kwargs
+    
+    @classmethod
+    def from_dict(cls, config_dict : Dict[str, Any], **kwargs) -> "PretrainedConfig":
+        return_unused_kwargs = kwargs.pop("return_unused_kwargs", False)
+        kwargs.pop("_from_auto", None)
+        kwargs.pop("from_pipeline", None)
+
+        if "_commit_hash" in kwargs and "_commit_hash" in config_dict:
+            kwargs['_commit_hash'] = config_dict["_commit_hash"]
+        
+        config_dict['attn_implementation'] = kwargs.pop("attn_implementation", None)
+
+        config = cls(**config_dict)
+
+        if hasattr(config, "pruned_heads"):
+            config.pruned_heads = {int(key) : value for key, value in config.pruned_heads.items()}
+        
+        if "num_labels" in kwargs and "id2label" in kwargs:
+            num_labels = kwargs['num_labels']
+            id2label = kwargs["id2label"] if kwargs['id2label'] is not None else []
+            if len(id2label) != num_labels:
+                raise ValueError(
+                    f"num_labels ({num_labels}) must match the length of id2label ({len(id2label)}).")
+            
+        to_remove = []
+        for key, value in kwargs.items():
+            if hasattr(config, key):
+                current_attr = getattr(config, key)
+                if isinstance(current_attr, PretrainedConfig) and isinstance(value, dict):
+                    value = current_attr.__class__(**value)
+                setattr(config, key, value)
+                if key != 'torch_dtype':
+                    to_remove.append(key)
+        for key in to_remove:
+            kwargs.pop(key, None)
+        
+        if return_unused_kwargs:
+            return config, kwargs
+        else:
+            return config
+        
+    @classmethod
+    def from_json_file(cls, json_file : Union[str, os.PathLike]) -> "PretrainedConfig":
+        config_dict = cls._dict_from_json_file(json_file)
+        return cls(**config_dict)
+    
+    @classmethod
+    def _dict_from_json_file(cls, json_file : Union[str, os.PathLike]):
+        with open(json_file, "r", encoding='utf-8') as reader:
+            text = reader.read()
+        return json.loads(text)
+    
+    def __eq__(self, other):
+        return isinstance(other, PretrainedConfig) and (self.__dict__ == other.__dict__)
+    
+    def __repr__(self):
+        return f"{self.__class__.__name__} {self.to_json_string()}"
+    
+    def to_diff_dict(self) -> Dict[str, Any]:
+        config_dict = self.to_dict()
+
+        default_config_dict = PretrainedConfig().to_dict()
+
+        class_config_dict = self.__class__().to_dict() if not self.is_composition else {}
+
+        serializable_config_dict = {}
+
+        for key, value in config_dict.items():
+            if(
+                isinstance(getattr(self, key, None), PretrainedConfig)
+                and key in class_config_dict
+                and isinstance(class_config_dict[key], dict)
+            ):
+                diff = recursive_diff_dict(value, class_config_dict[key], config_obj=getattr(self, key, None))
+                if "model_type" in value:
+                    diff["model_type"] = value['model_type']
+                if len(diff) > 0:
+                    serializable_config_dict[key] = diff
+                
+            elif (
+                key not in default_config_dict
+                or key == 'transformers_version'
+                or value != default_config_dict[key]
+                or (key in class_config_dict and value != class_config_dict[key])
+            ):
+                serializable_config_dict[key] = value
+            
+        if hasattr(self, "quantization_config"):
+            serializable_config_dict["quantization_config"] = (
+                self.quantization_config.to_dict()
+                if not isinstance(self.quantization_config, dict)
+                else self.quantization_config
+            )
+
+            _ = serializable_config_dict.pop("_pre_quantization_dtype", None)
+        
+        self.dict_torch_dtype_to_str(serializable_config_dict)
+
+        if "_attn_implementation_internal" in serializable_config_dict:
+            del serializable_config_dict["_attn_implementation_internal"]
+        
+        return serializable_config_dict
+    
+    def to_dict(self) -> Dict[str, Any]:
+        output = copy.deepcopy(self.__dict__)
+        if hasattr(self.__class__, "model_type"):
+            output["model_type"] = self.__class__.model_type
+        if "_auto_class" in output:
+            del output["_auto_class"]
+        if "_commit_hash" in output:
+            del output["_commit_hash"]
+        if "_attn_implementation_internal" in output:
+            del output["_attn_implementation_internal"]
+        
+        output["transformers_version"] = __version__
+
+        for key, value in output.items():
+            if isinstance(value, PretrainedConfig):
+                value = value.to_dict()
+                del value["transformers_version"]
+            
+            output[key] = value
+        
+        if hasattr(self, 'quentization_config'):
+            output['quantization_config'] = (
+                self.quantization_config.to_dict()
+                if not isinstance(self.quantization_config, dict)
+                else self.quantization_config
+
+            )
+
+            _ = output.pop("_pre_quantization_dtype", None)
+
+        self.dict_torch_dtype_to_str(output)
+
+        return output
+    
+    def to_json_string(self, use_diff : bool = True) -> str:
+        if use_diff is True:
+            config_dict = self.to_diff_dict()
+        else:
+            config_dict = self.to_dict()
+        return json.dumps(config_dict, indent=2, sort_keys=True) + '\n'
+    
+    def to_json_file(self, json_file_path : Union[str, os.PathLike], use_diff : bool = True):
+        with open(json_file_path, 'w', encoding='utf-8') as writer:
+            writer.write(self.to_json_string(use_diff=use_diff))
+    
+    def update(self, config_dict : Dict[str, Any]):
+        for key, value in config_dict.items():
+            setattr(self, key, value)
+    
+    def update_from_string(self, update_str : str):
+        d = dict(x.split("=") for x in update_str.split(","))
+        for k, v in d.items():
+            if not hasattr(self, k):
+                raise ValueError(f"Can't set {k} with {v}")
+            
+            old_v = getattr(self, k)
+            if isinstance(old_v, bool):
+                if v.lower() in ["true", "1", "y", "yest"]:
+                    v = True
+                elif v.lower() in ['false', '0', 'n', 'no']:
+                    v = False
+                else:
+                    raise ValueError(f"Can't convert {v} to bool")
+            
+            elif isinstance(old_v, int):
+                v = int(v)
+            elif isinstance(old_v, float):
+                v = float(v)
+            elif not isinstance(old_v, str):
+                raise TypeError(f"Can't convert {k} from {type(old_v)} to {type(v)}")
+            
+            setattr(self, k, v)
+    
+    def dict_torch_dtype_to_str(self, d: Dict[str, Any]) -> None:
+        if d.get("torch_dtype", None) is not None and not isinstance(d['torch_dtype'], str):
+            d['torch_dtype'] = str(d['torch_dtype']).split('.')[1]
+        for value in d.values():
+            if isinstance(value, dict):
+                self.dict_torch_dtype_to_str(value)
+    
+    @classmethod
+    def register_for_auto_class(cls, auto_class='AutoConfig'):
+        if not isinstance(auto_class, str):
+            auto_class = auto_class.__name__
+        
+        import transformers.models.auto as auto_module
+
+        if not hasattr(auto_module, auto_class):
+            raise ValueError(
+                f"The class {auto_class} is not found in the {auto_module.modeling_auto.__name__} module.")
+        cls._auto_class - auto_class
+
+    
+    @staticmethod
+    def _get_generation_defaults() -> Dict[str, Any]:
+        return {
+            "max_length": 20,
+            "min_length": 0,
+            "do_sample": False,
+            "early_stopping": False,
+            "num_beams": 1,
+            "num_beam_groups": 1,
+            "diversity_penalty": 0.0,
+            "temperature": 1.0,
+            "top_k": 50,
+            "top_p": 1.0,
+            "typical_p": 1.0,
+            "repetition_penalty": 1.0,
+            "length_penalty": 1.0,
+            "no_repeat_ngram_size": 0,
+            "encoder_no_repeat_ngram_size": 0,
+            "bad_words_ids": None,
+            "num_return_sequences": 1,
+            "output_scores": False,
+            "return_dict_in_generate": False,
+            "forced_bos_token_id": None,
+            "forced_eos_token_id": None,
+            "remove_invalid_values": False,
+            "exponential_decay_length_penalty": None,
+            "suppress_tokens": None,
+            "begin_suppress_tokens": None,
+        }
+    
+    def _has_non_default_generation_parameters(self) -> bool:
+        for parameter_name, default_value in self._get_generation_defaults().items():
+            if hasattr(self, parameter_name) and getattr(self, parameter_name) != default_value:
+                return True
+        return False
+    
+    
+    
+    
+        
 
 
 def get_configuration_file(configuration_files: List[str]) -> str:
@@ -407,3 +644,16 @@ def get_configuration_file(configuration_files: List[str]) -> str:
             break
 
     return configuration_file
+
+def recursive_diff_dict(dict_a, dict_b, config_obj=None):
+    diff = {}
+    default = config_obj.__class__().to_dict() if config_obj is not None else {}
+    for key, value in dict_a.items():
+        obj_value = getattr(config_obj, str(key), None)
+        if isinstance(obj_value, PretrainedConfig) and key in dict_b and isinstance(dict_b[key], dict):
+            diff_value = recursive_diff_dict(value, dict_b[key], config_obj=obj_value)
+            if len(diff_value) > 0:
+                diff[key] = diff_value
+        elif key not in dict_b or value != dict_b[key] or key not in default or value != default[key]:
+            diff[key] = value
+    return diff
