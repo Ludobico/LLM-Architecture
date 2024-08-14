@@ -13,6 +13,7 @@ from dynamic_module_utils import custom_object_save
 from Utils import CONFIG_NAME
 from Utils.customLogger import log
 from Utils.generic import add_model_info_to_auto_map, add_model_info_to_custom_pipelines
+from Utils.doc import copy_func
 
 _re_configuration_file = re.compile(r"config\.(.*)\.json")
 
@@ -657,3 +658,9 @@ def recursive_diff_dict(dict_a, dict_b, config_obj=None):
         elif key not in dict_b or value != dict_b[key] or key not in default or value != default[key]:
             diff[key] = value
     return diff
+
+PretrainedConfig.push_to_hub = copy_func(PretrainedConfig.push_to_hub)
+if PretrainedConfig.push_to_hub.__doc__ is not None:
+    PretrainedConfig.push_to_hub.__doc__ = PretrainedConfig.push_to_hub.__doc__.format(
+        object="config", object_class="AutoConfig", object_files = "configuration file"
+    )
