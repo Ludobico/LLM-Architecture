@@ -26,9 +26,12 @@ from torch.utils.checkpoint import checkpoint
 
 from Utils.import_utils import is_bitsandbytes_available, ENV_VARS_TRUE_VALUES, is_torch_xla_available
 from generation.utils import GenerationMixin
+from generation.configuration_utils import GenerationConfig
 from intergrations.peft import PeftAdapterMixin
+from intergrations.deepspeed import is_deepspeed_available, is_deepspeed_zero3_enabled
 from Utils.hub import PushToHubMixin
 from Utils import DUMMY_INPUTS
+from configuration_utils import PretrainedConfig
 
 XLA_USE_BF16 = os.environ.get("XLA_USE_BF16", "0").upper()
 XLA_DOWNCAST_BF16 = os.environ.get("XLA_DOWNCAST_BF16", "0").upper()
@@ -278,6 +281,82 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
     def framework(self) -> str:
         return "pt"
     
-    def __init__(self):
-        pass
+    def __init__(self, config : PretrainedConfig, *inputs, **kwargs):
+        super().__init__()
+        if not isinstance(config, PretrainedConfig):
+            raise ValueError(
+                f"Parameter config in `{self.__class__.__name__}(config)` should be an instance of class "
+                f"`PretrainedConfig`. To create a model from a pretrained model use ")
+        
+        config = self._autoset_attn_implementation(config, torch_dtype = torch.get_default_dtype(), check_device_map = False)
+        self.config = config
+
+        self.name_or_path = config.name_or_path
+        self.warnings_issued = {}
+        self.generation_config = GenerationConfig.from_model_config(config) if self.can_generate() else None
+        self._keep_in_fp32_modules = copy.copy(self.__class__._keep_in_fp32_modules)
+    
+    def post_init(self):
+        self.init_weights()
+        self._backward_compatibility_gradient_checkpointing()
+    
+    def dequantize(self):
+        hf_quantizer = getattr(self, "hf_quantizer", None)
+
+        if hf_quantizer is None:
+            raise ValueError("Model does not have a quantized weights.")
+        
+        return hf_quantizer.dequantize(self)
+    
+    def _backward_compatibility_gradient_checkpointing(self):
+        if self.supports_gradient_checkpointing and getattr(self.config, "gradient_checkpointing", False):
+            self.gradient_checkpointing_enable()
+            delattr(self.config, "gradient_checkpointing")
+        
+    def add_model_tags(self, tags : Union[List[str], str]) -> None:
+        if isinstance(tags, str):
+            tags = [tags]
+        if self.model_tags is None:
+            self.model_tags = []
+        
+        for tag in tags:
+            if tag not in self.model_tags:
+                self.model_tags.append(tag)
+    
+    @classmethod
+    def _from_config(cls, config, **kwargs):
+        torch_dtype = kwargs.pop("torch_dtype", None)
+        use_flash_attention_2 = kwargs.pop("use_flash_attention_2", False)
+
+        dtype_orig = None
+        if torch_dtype is not None:
+            dtype_orig = cls._set_default_torch_dtype(torch_dtype)
+        
+        config = copy.deepcopy(config)
+
+        if config._attn_implementation is not None:
+            attn_implementation = config._attn_implementation_internal
+        else:
+            attn_implementation = None
+        
+        config._attn_implementation = kwargs.pop('attn_implementation', attn_implementation)
+        config = cls._autoset_attn_implementation(
+            config,
+            use_flash_attention_2 = use_flash_attention_2,
+            check_device_map = False,
+            torch_dtype = torch_dtype
+        )
+
+        model = cls(config, **kwargs)
+        if dtype_orig is not None:
+            torch.set_default_dtype(dtype_orig)
+        
+        return model
+    
+
+    @classmethod
+    def _autoset_attn_implementation(cls, config, use_flash_attention_2 : bool = False, torch_dtype : Optional[torch.dtype] = None, device_map : Optional[Union[str, Dict[str, int]]] = None, check_device_map : bool = True):
+        requested_attn_implementation = None
+        
+
     

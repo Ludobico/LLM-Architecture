@@ -186,3 +186,19 @@ def is_accelerate_available(min_version : str = ACCELERATE_MIN_VERSION):
 
 def is_peft_available():
     return _peft_available
+
+@lru_cache()
+def is_torch_mlu_available(check_device = False):
+    if not _torch_available or importlib.util.find_spec("torch_mlu") is None:
+        return False
+    
+    import torch
+    import torch_mlu
+
+    if check_device:
+        try:
+            _ = torch.mlu.device_count()
+            return torch.mlu.is_available()
+        except RuntimeError:
+            return False
+    return hasattr(torch, 'mlu') and torch.mlu.is_available()
