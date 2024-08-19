@@ -202,3 +202,14 @@ def is_torch_mlu_available(check_device = False):
         except RuntimeError:
             return False
     return hasattr(torch, 'mlu') and torch.mlu.is_available()
+
+def is_torch_sdpa_available():
+    if not is_torch_avaiable():
+        return False
+    elif _torch_version == "N/A":
+        return False
+    
+    if is_torch_mlu_available():
+        return version.parse(_torch_version) >= version.parse("2.1.0")
+    
+    return version.parse(_torch_version) >= version.parse("2.1.1")

@@ -1,3 +1,4 @@
+import importlib.util
 import collections, sys, os
 sys.path.append(os.path.dirname(os.path.realpath(os.path.join(__file__, '..'))))
 import copy
@@ -24,7 +25,7 @@ from torch import Tensor, nn
 from torch.nn import CrossEntropyLoss, Identity
 from torch.utils.checkpoint import checkpoint
 
-from Utils.import_utils import is_bitsandbytes_available, ENV_VARS_TRUE_VALUES, is_torch_xla_available
+from Utils.import_utils import is_bitsandbytes_available, ENV_VARS_TRUE_VALUES, is_torch_xla_available, is_torch_sdpa_available
 from generation.utils import GenerationMixin
 from generation.configuration_utils import GenerationConfig
 from intergrations.peft import PeftAdapterMixin
@@ -357,6 +358,169 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
     @classmethod
     def _autoset_attn_implementation(cls, config, use_flash_attention_2 : bool = False, torch_dtype : Optional[torch.dtype] = None, device_map : Optional[Union[str, Dict[str, int]]] = None, check_device_map : bool = True):
         requested_attn_implementation = None
+
+        if hasattr(config, "_attn_implementation_internal") and config.__attn_implementation_internal is not None:
+            if config._attn_implementation != "flash_attention_2" and use_flash_attention_2:
+                raise ValueError("Flash attention 2 is not supported for this model.")
+            
+            if config._attn_implementation not in ['eager', 'sdpa', 'flash_attention_2']:
+                message = f"Unsupported attention implementation: {config._attn_implementation}."
+                if cls._supports_flash_attn_2:
+                    message += f" Supported implementations are 'eager', 'sdpa', and 'flash_attention_2'."
+                if cls._supports_sdpa:
+                    message += f" Supported implementations are 'eager' and 'sdpa'."
+                raise ValueError(message)
+            
+            requested_attn_implementation = config._attn_implementation_internal
+
+        if use_flash_attention_2:
+            config._attn_implementation = "flash_attention_2"
         
+        if config._attn_implementation == "flash_attention_2":
+            cls._check_and_enable_flsah_attn_2(
+                config,
+                torch_dtype = torch_dtype,
+                device_map = device_map,
+                hard_check_only = False,
+                check_device_map = check_device_map
+            )
+        elif requested_attn_implementation in [None, 'sdpa'] and not is_torch_xla_available():
+            config = cls._check_and_enable_sdpa(config, hard_check_only = False if requested_attn_implementation is None else True)
+        
+            if (torch.version.hip is not None and config._attn_implementation == 'sdpa' and torch.cuda.device_count() > 1):
+                torch.backends.cuda.enable_flash_sdp(False)
+        
+        else:
+            config._attn_implementation = "eager"
+        
+        return config
+    
+    @classmethod
+    def _set_default_torch_dtype(cls, dtype : torch.dtype) -> torch.dtype:
+        if not dtype.is_floating_point:
+            raise ValueError(f" `dtype` should be a floating point number but is {dtype}.")
+        
+        dtype_orig = torch.get_default_dtype()
+        torch.set_default_device(dtype)
+        return dtype_orig
+    
+    @property
+    def base_model(self) -> nn.Module:
+        return getattr(self, self.base_model_prefix, self)
+    
+    @classmethod
+    def can_generate(cls) -> bool:
+        if "GenerationMixin" in str(cls.prepare_inputs_for_generaion) and "GenerationMixin" in str(cls.generate):
+            return False
+        return True
+    
+    @classmethod
+    def _check_and_enable_flash_attn_2(
+        cls,
+        config,
+        torch_dtype : Optional[torch.dtype] = None,
+        device_map : Optional[Union[str, Dict[str, int]]] = None,
+        check_device_map : bool = True,
+        hard_check_only : bool = False
+    ) -> PretrainedConfig:
+        if not cls._supports_flash_attn_2:
+            raise ValueError("This model does not support Flash Attention 2.")
+        
+        if importlib.util.find_spec('flash_attn') is None:
+            raise ImportError("You need to install flash_attn (pip install flash_attn) to use Flash Attention 2.")
+        
+        flash_attention_version = version.parse(importlib.metadata.version("flash_attn"))
+        if torch.version.cuda:
+            if flash_attention_version < version.parse("2.1.0"):
+                raise ImportError("you need flash_attn package version to be greater or equal than 2.1.0.")
+            else:
+                raise ImportError("Flash Attention 2 is not available.")
+        
+        elif torch.version.hip:
+            if flash_attention_version < version.parse("2.0.4"):
+                raise ImportError(
+                    f" you need flash_attn package version to be greater or equal than 2.0.4. Make sure to have that version installed - detected version {flash_attention_version}"
+                )
+            else:
+                raise ImportError(f"Flash Attention 2 is not available.")
+
+        _is_bettertransformer = getattr(cls, "use_bettertransformer", False)
+
+        if _is_bettertransformer:
+            raise ValueError("BetterTransformer is not supported with Flash Attention 2.")
+        
+        if not hard_check_only:
+            config._attn_implementation = "flash_attention_2"
+        return config
+    
+    @classmethod
+    def _check_and_enable_sdpa(cls, config, hard_check_only : bool = False) -> PretrainedConfig:
+        if hard_check_only:
+            raise ValueError("SDPA is not supported with Flash Attention 2.")
+        
+        if not is_torch_sdpa_available():
+            raise ImportError("you need to install torch_sdpa (pip install torch-sdpa) to use Flash Attention 2.")
+        
+        if not is_torch_sdpa_available() or not cls._supports_sdpa:
+            return config
+        
+        _is_bettertransformer = getattr(cls, "use_bettertransformer", False)
+
+        if _is_bettertransformer:
+            return config
+        
+        if not hard_check_only:
+            config._attn_implementation = 'sdpa'
+        return config
+    
+    def enable_input_require_grads(self):
+        def make_inputs_require_grads(module, input, output):
+            output.requires_grad_(True)
+        self._require_grads_hook = self.get_input_embeddings().register_forward_hook(make_inputs_require_grads)
+
+    def disable_input_require_grads(self):
+        self._require_grads_hook.remove()
+
+    def get_input_embeddings(self) -> nn.Module:
+        base_model = getattr(self, self.base_model_prefix, self)
+
+        if base_model is not self:
+            return base_model.get_input_embeddings()
+        else:
+            raise NotImplementedError
+    
+    def set_input_embeddings(self, value : nn.Module):
+        base_model = getattr(self, self.base_model_prefix, self)
+
+        if base_model is not self:
+            base_model.set_input_embeddings(value)
+        else:
+            raise NotImplementedError
+    
+    def get_output_embeddings(self) -> nn.Module:
+        return None
+    
+    def _init_weights(self, module):
+        pass
+
+    def _initialize_weights(self, module):
+        if getattr(module, "_is_hf_initialized", False):
+            return
+        self._init_weights(module)
+        module._is_hf_initialized = True
+    
+    
+
+
+        
+
+        
+        
+    
+    
+
+            
+
+
 
     
