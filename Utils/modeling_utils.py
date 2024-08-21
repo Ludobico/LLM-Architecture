@@ -509,7 +509,153 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         self._init_weights(module)
         module._is_hf_initialized = True
     
+    def tie_weights(self):
+        if getattr(self.config, "tie_word_embeddings", True):
+            output_embeddings = self.get_output_embeddings()
+            if output_embeddings is not None:
+                self._tie_or_clone_weights(output_embeddings, self.get_input_embeddings())
+        
+        if getattr(self.config, "is_encoder_decoder", False) and getattr(self.config, "tie_encoder_decoder", False):
+            if hasattr(self, self.base_model_prefix):
+                self = getattr(self, self.base_model_prefix)
+            tied_weights = self._tie_encoder_decoder_weights(self.encoder, self.decoder, self.base_model_prefix, "encoder")
+            self._dynamic_tied_weights_keys = tied_weights
+
+        for module in self.modules():
+            if hasattr(module, '_tie_weights'):
+                module._tie_weights()
     
+    @staticmethod
+    def _tie_encoder_decoder_weights(encoder : nn.Module, decoder : nn.Module, base_model_prefix : str, base_encoder_name : str):
+        uninitialized_encoder_weights : List[str] = []
+        tied_weights = List[str] = []
+        if decoder.__class__ != encoder.__class__:
+            warnings.warn(
+                f"""The decoder is of type {decoder.__class__} and the encoder is of type {encoder.__class__}.""")
+            
+        def tie_encoder_to_decoder_recursively(
+                decoder_pointer : nn.Module,
+                encoder_pointer : nn.Module,
+                module_name : str,
+                base_encoder_name : str,
+                uninitialized_encoder_weights : List[str],
+                depth = 0,
+                total_decoder_name = "",
+                total_encoder_name = ""
+        ):
+            assert isinstance(decoder_pointer, nn.Module) and isinstance(encoder_pointer, nn.Module), f"""Module {decoder_pointer} and {encoder_pointer} must be of type nn.Module."""
+            if hasattr(decoder_pointer, "weight"):
+                assert hasattr(encoder_pointer, 'weight')
+                encoder_pointer.weight = decoder_pointer.weight
+                tied_weights.append(f"{total_decoder_name}/{total_encoder_name}")
+                if hasattr(decoder_pointer, 'bias'):
+                    assert hasattr(encoder_pointer, 'bias')
+                    tied_weights.append(f"{total_decoder_name}/{total_encoder_name}")
+                    encoder_pointer.bias = decoder_pointer.bias
+                return
+            
+            encoder_modules = encoder_pointer._modules
+            decoder_modules = decoder_pointer._modules
+
+            if len(decoder_pointer) > 0:
+                assert(len(encoder_modules) > 0), f"Module {decoder_pointer} of type {decoder_pointer.__class__} has no submodules."
+
+                all_encoder_weights = {module_name + '/' + sub_name for sub_name in encoder_modules.keys()}
+                encoder_layer_pos = 0
+                for name, module in decoder_modules.items():
+                    if name.isdigit():
+                        encoder_name = str(int(name) + encoder_layer_pos)
+                        decoder_name = name
+
+                        if not isinstance(decoder_modules[decoder_name], type(encoder_modules[encoder_name])) and len(encoder_modules) != len(decoder_modules):
+                            encoder_layer_pos -= 1
+                            continue
+                    
+                    elif name in encoder_modules:
+                        continue
+                    elif depth > 500:
+                        raise ValueError(
+                            f"Failed to automatically recover weights in {decoder_name} of type {decoder.__class__}.")
+                    else:
+                        decoder_name = encoder_name = name
+                    tie_encoder_to_decoder_recursively(decoder_modules[decoder_name], encoder_modules[encoder_name], module_name + '/' + name, base_encoder_name, uninitialized_encoder_weights, depth=depth + 1, total_encoder_name=f"{total_encoder_name}.{encoder_name}", total_decoder_name=f"{total_decoder_name}.{decoder_name}")
+                    all_encoder_weights.remove(module_name + '/' + encoder_name)
+                
+                uninitialized_encoder_weights += list(all_encoder_weights)
+        
+        tie_encoder_to_decoder_recursively(decoder, encoder, base_model_prefix, base_encoder_name, uninitialized_encoder_weights)
+
+        if len(uninitialized_encoder_weights) > 0:
+            warnings.warn(
+                f"The following encoder weights were not tied, and are therefore initialized randomly: {uninitialized_encoder_weights}")
+        return tied_weights
+    
+    def _tie_or_clone_weights(self, output_embeddings , input_embeddings ):
+        if self.config.torchscript:
+            output_embeddings.weight = nn.Parameter(input_embeddings.weight.clone())
+        else:
+            output_embeddings.weight = input_embeddings.weight
+        
+        if getattr(output_embeddings, 'bias', None) is not None:
+            output_embeddings.bias.data = nn.functional.pad(
+                output_embeddings.bias.data,
+                (
+                    0,
+                    output_embeddings.weight.shape[0] - output_embeddings.bias.shape[0]
+                ),
+                "constant",
+                0,
+            )
+
+        if hasattr(output_embeddings, "out_features") and hasattr(input_embeddings, "num_embeddings"):
+            output_embeddings.out_features = input_embeddings.num_embeddings
+    
+    def _get_no_split_modules(self, device_map : str):
+        _no_split_modules = set()
+        modules_to_check = [self]
+        while len(modules_to_check) > 0:
+            module = modules_to_check.pop(-1)
+
+            if module.__class__.__name__ not in _no_split_modules:
+                if isinstance(module, PreTrainedModel):
+                    if module._no_split_modules is None:
+                        raise ValueError(
+                            f"{module.__class__.__name__} should set `_no_split_modules` attribute"
+                        )
+                    else:
+                        _no_split_modules = _no_split_modules | set(module._no_split_modules)
+                modules_to_check += list(module.children())
+        return list(_no_split_modules)
+    
+    def resize_token_embeddings(self, new_num_tokens : Optional[int] = None, pad_to_multiple_of : Optional[int] = None) -> nn.Embedding:
+        model_embeds = self._resize_token_embeddings(new_num_tokens, pad_to_multiple_of)
+        if new_num_tokens is None and pad_to_multiple_of is None:
+            return model_embeds
+        
+        is_quantized = hasattr(self, 'hf_quantizer') and self.hf_quantizer is not None
+        if is_deepspeed_zero3_enabled() and not is_quantized:
+            import deepspeed
+
+            with deepspeed.zero.GatheredParameters(model_embeds, modifier_rank=None):
+                vocab_size = model_embeds.weight.shape[0]
+        else:
+            vocab_size = model_embeds.weight.shape[0]
+        
+        if hasattr(self.config, "text_config"):
+            self.config.text_config.vocab_size = vocab_size
+        else:
+            self.config.vocab_size = vocab_size
+        self.vocab_size = vocab_size
+
+        self.tie_weights()
+
+        return model_embeds
+    
+    def _resize_token_embeddings(self, new_num_tokens, pad_to_multiple_of = None):
+        pass
+        
+    
+
 
 
         
