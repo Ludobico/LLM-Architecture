@@ -34,6 +34,8 @@ from Utils.hub import PushToHubMixin
 from Utils import DUMMY_INPUTS
 from configuration_utils import PretrainedConfig
 
+from accelerate.hooks import add_hook_to_module
+
 XLA_USE_BF16 = os.environ.get("XLA_USE_BF16", "0").upper()
 XLA_DOWNCAST_BF16 = os.environ.get("XLA_DOWNCAST_BF16", "0").upper()
 PARAM_RENAME_WARNING = "WARNING: The parameter name in your model is different from its name in the checkpoint. "
@@ -652,7 +654,33 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         return model_embeds
     
     def _resize_token_embeddings(self, new_num_tokens, pad_to_multiple_of = None):
-        pass
+        old_embeddings = self.get_input_embeddings()
+        new_embeddings = self._get_resized_embeddings(old_embeddings, new_num_tokens, pad_to_multiple_of)
+        if hasattr(old_embeddings, "_hf_hook"):
+            hook = old_embeddings._hf_hook
+            add_hook_to_module(new_embeddings, hook)
+        
+        old_embeddings_requires_grad = old_embeddings.weight.requires_grad
+        new_embeddings.requires_grad_(old_embeddings_requires_grad)
+        self.set_input_embeddings(new_embeddings)
+        is_quantized = hasattr(self, "hf_quantizer") and self.hf_quantizer is not None
+
+        if pad_to_multiple_of is not None:
+            if is_deepspeed_zero3_enabled() and not is_quantized:
+                import deepspeed
+
+                with deepspeed.zero.GatheredParameters(old_embeddings.weight, modifier_rank=None):
+                    new_num_tokens = new_embeddings.weight.shape[0]
+            else:
+                new_num_tokens = new_embeddings.weight.shape[0]
+        
+        if self.get_output_embeddings() is not None and not self.config.tie_word_embeddings:
+            old_lm_head = self.get_output_embeddings()
+            if isinstance(old_lm_head, torch.nn.Embedding):
+                new_lm_head = self._get_resized_embeddings(old_lm_head, new_num_tokens)
+            else:
+                new_lm_head = self._get_resized_lm_head(old_lm_head, new_num_tokens)
+            
         
     
 
