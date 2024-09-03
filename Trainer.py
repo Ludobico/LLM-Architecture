@@ -105,7 +105,6 @@ class TrainQwen:
         output_dir=os.path.join(cls().output_dir, cls().output_name),
         per_device_train_batch_size=8,
         num_train_epochs=cls().epoch,
-        warmup_steps=0.03,
         learning_rate=1e-5,
         logging_steps=20,
         optim="paged_adamw_8bit",
