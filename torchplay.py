@@ -10,7 +10,7 @@ def self_attention(query, key, value):
     return torch.matmul(attention_weights, value), attention_weights
 
 # Tokenize the input sentence
-sentence = "I am Optimus prime, Therefore I'm on"
+sentence = "Continue from the sentence I am Optimus prime, Therefore I'm on"
 tokens = sentence.lower().split()
 
 # Create embeddings (here we're using random embeddings for simplicity)
